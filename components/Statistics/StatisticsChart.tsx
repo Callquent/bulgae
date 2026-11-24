@@ -1,0 +1,945 @@
+"use client";
+import React, { useState, useEffect, Fragment as ReactFragment } from "react";
+import {
+  Chart as ChartJS,
+  ArcElement,
+  CategoryScale,
+  LinearScale,
+  PointElement,
+  LineElement,
+  Title,
+  Tooltip,
+  Legend,
+  Filler,
+} from "chart.js";
+import { Pie, Line } from "react-chartjs-2";
+
+ChartJS.register(
+  ArcElement,
+  CategoryScale,
+  LinearScale,
+  PointElement,
+  LineElement,
+  Title,
+  Tooltip,
+  Legend,
+  Filler,
+);
+
+import type { StatisticsChartProps } from "./Statistics.interface";
+
+const API = "/api";
+
+// Style épuré des tableaux, cohérent avec BudgetYearView : en-têtes discrets,
+// filets fins plutôt que des bordures Bootstrap épaisses, espacement généreux.
+const thStyle: React.CSSProperties = {
+  fontSize: ".72rem",
+  fontWeight: 600,
+  color: "#6c757d",
+  textTransform: "uppercase",
+  letterSpacing: ".06em",
+  borderBottom: "2px solid #e9ecef",
+  padding: "12px 16px",
+  whiteSpace: "nowrap",
+};
+
+const tdStyle: React.CSSProperties = {
+  borderBottom: "1px solid #eef0f2",
+  padding: "14px 16px",
+  verticalAlign: "middle",
+};
+
+function formatNumber(num: number | string) {
+  return new Intl.NumberFormat("fr-FR", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(parseFloat(String(num)) || 0);
+}
+
+const CHART_COLORS = [
+  "#3b82f6",
+  "#ef4444",
+  "#10b981",
+  "#f59e0b",
+  "#8b5cf6",
+  "#ec4899",
+  "#06b6d4",
+  "#f97316",
+  "#6366f1",
+  "#14b8a6",
+  "#94a3b8",
+  "#fca5a5",
+  "#fde68a",
+  "#bbf7d0",
+  "#bfdbfe",
+];
+
+// MONTHS vient désormais de l'API (props.monthNames), source unique partagée
+// avec le backend (App\Support\BudgetLabels) — plus de duplication.
+
+interface CategoryGroup {
+  label: string;
+  categories: string[];
+}
+
+const GROUPS_STORAGE_KEY = "statistics-category-groups";
+
+// Calcule, pour le graphique de répartition uniquement, le libellé à afficher
+// pour chaque catégorie brute en tenant compte des groupes définis par l'utilisateur
+// (le tableau "Détail par catégorie" reste inchangé, catégorie par catégorie).
+function buildCategoryToLabel(categories: string[], groups: CategoryGroup[]) {
+  const categoryToLabel: Record<string, string> = {};
+  const groupedLabels: string[] = [];
+  const seen = new Set<string>();
+
+  categories.forEach((cat) => {
+    const groupEntry = groups.find((g) => g.categories.includes(cat));
+    const label = groupEntry ? groupEntry.label : cat;
+    categoryToLabel[cat] = label;
+    if (!seen.has(label)) {
+      seen.add(label);
+      groupedLabels.push(label);
+    }
+  });
+
+  return { categoryToLabel, groupedLabels };
+}
+
+export default function StatisticsChart({
+  year,
+  groupBy,
+  summary,
+  plannedChart,
+  actualChart,
+  categories,
+  plannedMonthly,
+  actualMonthly,
+  netPlannedMonthly,
+  netActualMonthly,
+  plannedIncomeMonthly,
+  actualIncomeMonthly,
+  monthNames,
+}: StatisticsChartProps) {
+  const [activeTab, setActiveTab] = useState<"dist" | "evo">("dist");
+
+  const [groups, setGroups] = useState<CategoryGroup[]>([]);
+  const [groupsLoaded, setGroupsLoaded] = useState(false);
+  const [selectedCats, setSelectedCats] = useState<string[]>([]);
+  const [newGroupLabel, setNewGroupLabel] = useState("");
+  const [showGroupPanel, setShowGroupPanel] = useState(false);
+
+  // Chargement des groupes définis par l'utilisateur (persistés en local, par navigateur).
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem(GROUPS_STORAGE_KEY);
+      if (saved) setGroups(JSON.parse(saved));
+    } catch (e) {
+      console.error("Lecture des groupes de catégories impossible", e);
+    } finally {
+      setGroupsLoaded(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!groupsLoaded) return;
+    try {
+      window.localStorage.setItem(GROUPS_STORAGE_KEY, JSON.stringify(groups));
+    } catch (e) {
+      console.error("Sauvegarde des groupes de catégories impossible", e);
+    }
+  }, [groups, groupsLoaded]);
+
+  function toggleCatSelection(cat: string) {
+    setSelectedCats((prev) =>
+      prev.includes(cat) ? prev.filter((c) => c !== cat) : [...prev, cat],
+    );
+  }
+
+  function createGroup() {
+    const label = newGroupLabel.trim();
+    if (!label || selectedCats.length < 2) return;
+    setGroups((prev) => [...prev, { label, categories: selectedCats }]);
+    setSelectedCats([]);
+    setNewGroupLabel("");
+  }
+
+  function removeGroup(label: string) {
+    setGroups((prev) => prev.filter((g) => g.label !== label));
+  }
+
+  // Catégories déjà utilisées dans un groupe existant, pour éviter les doublons.
+  const groupedCategoriesSet = new Set(groups.flatMap((g) => g.categories));
+
+  const [selectedLabel, setSelectedLabel] = useState<string | null>(null);
+  const [budgetRows, setBudgetRows] = useState<
+    {
+      category_name: string;
+      label: string | null;
+      month: number;
+      planned: number;
+      actual: number;
+      approved: boolean;
+    }[]
+  >([]);
+  const [loadingBudgets, setLoadingBudgets] = useState(false);
+  const [expandedMonths, setExpandedMonths] = useState<Set<number>>(new Set());
+
+  function toggleMonth(month: number) {
+    setExpandedMonths((prev) => {
+      const next = new Set(prev);
+      if (next.has(month)) {
+        next.delete(month);
+      } else {
+        next.add(month);
+      }
+      return next;
+    });
+  }
+
+  const budgetMonths = Array.from(new Set(budgetRows.map((r) => r.month)));
+  const allMonthsExpanded =
+    budgetMonths.length > 0 && budgetMonths.every((m) => expandedMonths.has(m));
+
+  function toggleAllMonths() {
+    setExpandedMonths(allMonthsExpanded ? new Set() : new Set(budgetMonths));
+  }
+
+  // Affiche le détail des budgets d'une catégorie/sous-catégorie cliquée (ligne du
+  // tableau ou part de camembert). Si le libellé cliqué correspond à un groupe
+  // personnalisé (regroupement manuel de catégories, voir plus haut), interroge
+  // chacune des catégories brutes qui le composent et fusionne les résultats —
+  // le backend, lui, ne connaît que le regroupement parent/sous-catégorie.
+  async function handleSelectLabel(label: string) {
+    setSelectedLabel(label);
+    setLoadingBudgets(true);
+    setBudgetRows([]);
+    setExpandedMonths(new Set());
+
+    const customGroup = groups.find((g) => g.label === label);
+    const rawLabels = customGroup ? customGroup.categories : [label];
+
+    try {
+      const results = await Promise.all(
+        rawLabels.map((raw) =>
+          fetch(
+            `${API}/statistics/${year}/budgets?label=${encodeURIComponent(raw)}&groupBy=${groupBy}`,
+          ).then((res) => {
+            if (!res.ok) throw new Error(`Erreur ${res.status}`);
+            return res.json();
+          }),
+        ),
+      );
+      const merged = results.flatMap((r) => r.budgets ?? []);
+      merged.sort(
+        (a, b) =>
+          a.category_name.localeCompare(b.category_name) || a.month - b.month,
+      );
+      setBudgetRows(merged);
+    } catch (e) {
+      console.error("Impossible de charger le détail des budgets", e);
+    } finally {
+      setLoadingBudgets(false);
+    }
+  }
+
+  function closeBudgetModal() {
+    setSelectedLabel(null);
+    setBudgetRows([]);
+  }
+
+  // Utilisé pour le clic sur une part de camembert (chart.js retourne l'index
+  // de l'élément cliqué, à traduire en libellé via groupedLabels).
+  function handlePieClick(_event: unknown, elements: { index: number }[]) {
+    if (!elements.length) return;
+    const label = groupedLabels[elements[0].index];
+    if (label) handleSelectLabel(label);
+  }
+
+  // Conversion défensive : les montants peuvent arriver en string (colonnes
+  // decimal Doctrine/Symfony). "+" sur des strings concatène au lieu d'additionner
+  // (contrairement à "-"), d'où le bug TOTAL NaN corrigé ici.
+  const toNum = (v: number | string) => parseFloat(String(v)) || 0;
+
+  const totalPlanned = summary.reduce((s, r) => s + toNum(r.planned), 0);
+  const totalActual = summary.reduce((s, r) => s + toNum(r.actual), 0);
+
+  const { categoryToLabel, groupedLabels } = buildCategoryToLabel(categories, groups);
+
+  // Même regroupement que pour le camembert, appliqué au tableau de détail :
+  // les lignes des catégories fusionnées sont sommées sous le libellé du groupe.
+  const groupedSummary = groupedLabels.map((label) => {
+    const rows = summary.filter((r) => categoryToLabel[r.category_name] === label);
+    return {
+      category_name: label,
+      planned: rows.reduce((s, r) => s + toNum(r.planned), 0),
+      actual: rows.reduce((s, r) => s + toNum(r.actual), 0),
+    };
+  });
+
+  // Tri du tableau "Détail par catégorie" : clic sur un en-tête pour trier,
+  // reclic pour inverser le sens (asc <-> desc).
+  type SortKey = "category" | "planned" | "variance" | "actual" | "actualPct";
+  const [sortKey, setSortKey] = useState<SortKey>("category");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+
+  const handleSort = (key: SortKey) => {
+    if (key === sortKey) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDir("asc");
+    }
+  };
+
+  const sortArrow = (key: SortKey) => {
+    if (key !== sortKey)
+      return (
+        <i
+          className="bi bi-chevron-expand text-muted opacity-50 ms-1"
+          style={{ fontSize: ".65rem" }}
+        ></i>
+      );
+    return sortDir === "asc" ? (
+      <i className="bi bi-caret-up-fill ms-1" style={{ fontSize: ".65rem" }}></i>
+    ) : (
+      <i className="bi bi-caret-down-fill ms-1" style={{ fontSize: ".65rem" }}></i>
+    );
+  };
+
+  const sortedSummary = [...groupedSummary].sort((a, b) => {
+    let cmp = 0;
+    if (sortKey === "category") {
+      cmp = a.category_name.localeCompare(b.category_name);
+    } else if (sortKey === "planned") {
+      cmp = toNum(a.planned) - toNum(b.planned);
+    } else if (sortKey === "actual" || sortKey === "actualPct") {
+      cmp = toNum(a.actual) - toNum(b.actual);
+    } else if (sortKey === "variance") {
+      cmp = (toNum(a.planned) - toNum(a.actual)) - (toNum(b.planned) - toNum(b.actual));
+    }
+    return sortDir === "asc" ? cmp : -cmp;
+  });
+
+  const pieData = (dataObj: Record<string, number | string>) => {
+    const groupedValues: Record<string, number> = {};
+    categories.forEach((cat) => {
+      const label = categoryToLabel[cat];
+      groupedValues[label] = (groupedValues[label] ?? 0) + toNum(dataObj[cat] ?? 0);
+    });
+
+    return {
+      labels: groupedLabels,
+      datasets: [
+        {
+          data: groupedLabels.map((l) => groupedValues[l] ?? 0),
+          backgroundColor: CHART_COLORS,
+        },
+      ],
+    };
+  };
+
+  const lineData = {
+    labels: monthNames,
+    datasets: [
+      {
+        label: "Prévu",
+        data: plannedMonthly,
+        borderColor: "#3b82f6",
+        backgroundColor: "rgba(59, 130, 246, 0.1)",
+        fill: true,
+        tension: 0.3,
+        borderWidth: 3,
+        pointRadius: 4,
+      },
+      {
+        label: "Réalisé",
+        data: actualMonthly,
+        borderColor: "#10b981",
+        backgroundColor: "rgba(16, 185, 129, 0.1)",
+        fill: true,
+        tension: 0.3,
+        borderWidth: 3,
+        pointRadius: 4,
+      },
+    ],
+  };
+
+  const netLineData = {
+    labels: monthNames,
+    datasets: [
+      {
+        label: "Bilan prévu",
+        data: netPlannedMonthly.map(toNum),
+        borderColor: "#8b5cf6",
+        backgroundColor: "rgba(139, 92, 246, 0.1)",
+        fill: true,
+        tension: 0.3,
+        borderWidth: 3,
+        pointRadius: 4,
+      },
+      {
+        label: "Bilan réalisé",
+        data: netActualMonthly.map(toNum),
+        borderColor: "#ec4899",
+        backgroundColor: "rgba(236, 72, 153, 0.1)",
+        fill: true,
+        tension: 0.3,
+        borderWidth: 3,
+        pointRadius: 4,
+      },
+    ],
+  };
+
+  const incomeLineData = {
+    labels: monthNames,
+    datasets: [
+      {
+        label: "Prévu",
+        data: plannedIncomeMonthly.map(toNum),
+        borderColor: "#0891b2",
+        backgroundColor: "rgba(8, 145, 178, 0.1)",
+        fill: true,
+        tension: 0.3,
+        borderWidth: 3,
+        pointRadius: 4,
+      },
+      {
+        label: "Réalisé",
+        data: actualIncomeMonthly.map(toNum),
+        borderColor: "#22c55e",
+        backgroundColor: "rgba(34, 197, 94, 0.1)",
+        fill: true,
+        tension: 0.3,
+        borderWidth: 3,
+        pointRadius: 4,
+      },
+    ],
+  };
+
+  return (
+    <>
+      <div className="d-flex align-items-center justify-content-between border-bottom mb-4">
+        <ul className="nav nav-underline gap-2" role="tablist">
+          <li className="nav-item" role="presentation">
+            <button
+              className={`nav-link ${activeTab === "dist" ? "active" : "text-secondary"}`}
+              onClick={() => setActiveTab("dist")}
+              type="button"
+            >
+              Répartition
+            </button>
+          </li>
+          <li className="nav-item" role="presentation">
+            <button
+              className={`nav-link ${activeTab === "evo" ? "active" : "text-secondary"}`}
+              onClick={() => setActiveTab("evo")}
+              type="button"
+            >
+              Évolution
+            </button>
+          </li>
+        </ul>
+
+        {activeTab === "dist" && (
+          <div className="position-relative pb-1">
+            <button
+              type="button"
+              className="btn btn-sm btn-light border d-flex align-items-center gap-2"
+              onClick={() => setShowGroupPanel((v) => !v)}
+            >
+              <i className="bi bi-diagram-3"></i>
+              Regrouper
+              {groups.length > 0 && (
+                <span className="badge rounded-pill bg-primary">{groups.length}</span>
+              )}
+            </button>
+
+            {showGroupPanel && (
+              <>
+                <div
+                  className="position-fixed top-0 start-0 w-100 h-100"
+                  style={{ zIndex: 1040 }}
+                  onClick={() => setShowGroupPanel(false)}
+                ></div>
+                <div
+                  className="card shadow position-absolute end-0 mt-2 p-3"
+                  style={{ zIndex: 1050, width: "min(440px, 90vw)" }}
+                >
+                  {groups.length > 0 && (
+                    <div className="d-flex flex-wrap gap-1 mb-3">
+                      {groups.map((g) => (
+                        <span
+                          key={g.label}
+                          className="badge bg-light text-dark border fw-normal d-flex align-items-center gap-2 py-2 px-2"
+                          title={g.categories.join(", ")}
+                        >
+                          {g.label}
+                          <i
+                            className="bi bi-x text-muted"
+                            role="button"
+                            onClick={() => removeGroup(g.label)}
+                          ></i>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
+                  <div
+                    className="d-flex flex-wrap gap-1 mb-3"
+                    style={{ maxHeight: "160px", overflowY: "auto" }}
+                  >
+                    {categories.map((cat) => {
+                      const alreadyGrouped = groupedCategoriesSet.has(cat);
+                      return (
+                        <button
+                          key={cat}
+                          type="button"
+                          disabled={alreadyGrouped}
+                          className={`btn btn-sm ${
+                            selectedCats.includes(cat) ? "btn-primary" : "btn-outline-secondary"
+                          }`}
+                          onClick={() => toggleCatSelection(cat)}
+                          title={alreadyGrouped ? "Déjà dans un groupe" : ""}
+                        >
+                          {cat}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <div className="input-group input-group-sm">
+                    <input
+                      type="text"
+                      className="form-control"
+                      placeholder="Nom du groupe (2 catégories min.)"
+                      value={newGroupLabel}
+                      onChange={(e) => setNewGroupLabel(e.target.value)}
+                    />
+                    <button
+                      className="btn btn-primary"
+                      type="button"
+                      disabled={selectedCats.length < 2 || !newGroupLabel.trim()}
+                      onClick={createGroup}
+                    >
+                      Créer
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="tab-content">
+        {activeTab === "dist" && (
+          <div className="tab-pane fade show active">
+
+            <div className="row g-3 mb-4">
+              <div className="col-md-6">
+                <div className="card h-100">
+                  <div className="card-header bg-white fw-semibold">
+                    Répartition Prévue (Annuelle)
+                  </div>
+                  <div className="card-body d-flex justify-content-center">
+                    <div
+                      style={{
+                        maxWidth: "400px",
+                        maxHeight: "400px",
+                        width: "100%",
+                      }}
+                    >
+                      <Pie
+                        data={pieData(plannedChart)}
+                        options={{
+                          plugins: { legend: { position: "bottom" } },
+                          onClick: handlePieClick,
+                          onHover: (evt, elements) => {
+                            (evt.native?.target as HTMLElement).style.cursor = elements.length
+                              ? "pointer"
+                              : "default";
+                          },
+                        }}
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className="col-md-6">
+                <div className="card h-100">
+                  <div className="card-header bg-white fw-semibold">
+                    Répartition Réelle (Annuelle)
+                  </div>
+                  <div className="card-body d-flex justify-content-center">
+                    <div
+                      style={{
+                        maxWidth: "400px",
+                        maxHeight: "400px",
+                        width: "100%",
+                      }}
+                    >
+                      <Pie
+                        data={pieData(actualChart)}
+                        options={{
+                          plugins: { legend: { position: "bottom" } },
+                          onClick: handlePieClick,
+                          onHover: (evt, elements) => {
+                            (evt.native?.target as HTMLElement).style.cursor = elements.length
+                              ? "pointer"
+                              : "default";
+                          },
+                        }}
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="card">
+              <div className="card-header bg-white fw-semibold">Détail par catégorie</div>
+              <div className="table-responsive">
+                <table className="table table-hover mb-0 align-middle">
+                  <thead>
+                    <tr>
+                      <th
+                        role="button"
+                        onClick={() => handleSort("category")}
+                        style={{
+                          ...thStyle,
+                          cursor: "pointer",
+                          color: sortKey === "category" ? "#212529" : thStyle.color,
+                        }}
+                      >
+                        Catégorie{sortArrow("category")}
+                      </th>
+                      <th
+                        role="button"
+                        onClick={() => handleSort("planned")}
+                        className="text-end"
+                        style={{
+                          ...thStyle,
+                          cursor: "pointer",
+                          color: sortKey === "planned" ? "#212529" : thStyle.color,
+                        }}
+                      >
+                        Total Prévu{sortArrow("planned")}
+                      </th>
+                      <th
+                        role="button"
+                        onClick={() => handleSort("variance")}
+                        className="text-end"
+                        style={{
+                          ...thStyle,
+                          cursor: "pointer",
+                          color: sortKey === "variance" ? "#212529" : thStyle.color,
+                        }}
+                      >
+                        Écart{sortArrow("variance")}
+                      </th>
+                      <th
+                        role="button"
+                        onClick={() => handleSort("actual")}
+                        className="text-end"
+                        style={{
+                          ...thStyle,
+                          cursor: "pointer",
+                          color: sortKey === "actual" ? "#212529" : thStyle.color,
+                        }}
+                      >
+                        Total Réalisé{sortArrow("actual")}
+                      </th>
+                      <th
+                        role="button"
+                        onClick={() => handleSort("actualPct")}
+                        className="text-end"
+                        style={{
+                          ...thStyle,
+                          cursor: "pointer",
+                          color: sortKey === "actualPct" ? "#212529" : thStyle.color,
+                        }}
+                      >
+                        Pourcentage réalisé{sortArrow("actualPct")}
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sortedSummary.map((row, idx) => {
+                      const variance = toNum(row.planned) - toNum(row.actual);
+                      const pct = totalActual > 0 ? (toNum(row.actual) / totalActual) * 100 : 0;
+                      return (
+                        <tr
+                          key={idx}
+                          role="button"
+                          style={{ cursor: "pointer" }}
+                          onClick={() => handleSelectLabel(row.category_name)}
+                        >
+                          <td className="fw-medium" style={tdStyle}>
+                            {row.category_name}
+                          </td>
+                          <td className="text-end text-muted" style={tdStyle}>
+                            {formatNumber(row.planned)} €
+                          </td>
+                          <td
+                            className={`text-end ${variance > 0 ? "text-success" : variance < 0 ? "text-danger" : "text-muted"}`}
+                            style={tdStyle}
+                          >
+                            {variance !== 0
+                              ? `${variance > 0 ? "+" : ""}${formatNumber(variance)} €`
+                              : "—"}
+                          </td>
+                          <td className="text-end fw-medium" style={tdStyle}>
+                            {formatNumber(row.actual)} €
+                          </td>
+                          <td className="text-end text-muted small" style={tdStyle}>
+                            {pct.toFixed(1)} %
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                  <tfoot>
+                    <tr className="fw-semibold">
+                      <td style={{ ...tdStyle, borderBottom: "none", borderTop: "2px solid #e9ecef" }}>
+                        Total
+                      </td>
+                      <td
+                        className="text-end text-muted"
+                        style={{ ...tdStyle, borderBottom: "none", borderTop: "2px solid #e9ecef" }}
+                      >
+                        {formatNumber(totalPlanned)} €
+                      </td>
+                      <td
+                        className={`text-end ${totalPlanned - totalActual > 0 ? "text-success" : totalPlanned - totalActual < 0 ? "text-danger" : "text-muted"}`}
+                        style={{ ...tdStyle, borderBottom: "none", borderTop: "2px solid #e9ecef" }}
+                      >
+                        {totalPlanned - totalActual !== 0
+                          ? `${totalPlanned - totalActual > 0 ? "+" : ""}${formatNumber(totalPlanned - totalActual)} €`
+                          : "—"}
+                      </td>
+                      <td
+                        className="text-end"
+                        style={{ ...tdStyle, borderBottom: "none", borderTop: "2px solid #e9ecef" }}
+                      >
+                        {formatNumber(totalActual)} €
+                      </td>
+                      <td
+                        className="text-end text-muted small"
+                        style={{ ...tdStyle, borderBottom: "none", borderTop: "2px solid #e9ecef" }}
+                      >
+                        {totalActual > 0 ? "100,0" : "0,0"} %
+                      </td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === "evo" && (
+          <div className="tab-pane fade show active">
+            <div className="card mb-4">
+              <div className="card-header bg-white fw-semibold">
+                <i className="bi bi-graph-up me-2 text-primary"></i>
+                Évolution des dépenses mensuelles
+              </div>
+              <div className="card-body" style={{ height: "400px" }}>
+                <Line
+                  data={lineData}
+                  options={{
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { position: "top" } },
+                    scales: { y: { beginAtZero: true } },
+                  }}
+                />
+              </div>
+            </div>
+
+            <div className="card mb-4">
+              <div className="card-header bg-white fw-semibold">
+                <i className="bi bi-graph-up-arrow me-2 text-success"></i>
+                Évolution des revenus mensuels
+              </div>
+              <div className="card-body" style={{ height: "400px" }}>
+                <Line
+                  data={incomeLineData}
+                  options={{
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { position: "top" } },
+                    scales: { y: { beginAtZero: true } },
+                  }}
+                />
+              </div>
+            </div>
+
+            <div className="card">
+              <div className="card-header bg-white fw-semibold">
+                <i className="bi bi-cash-stack me-2 text-primary"></i>
+                Bilan mensuel (revenus − dépenses)
+              </div>
+              <div className="card-body" style={{ height: "400px" }}>
+                <Line
+                  data={netLineData}
+                  options={{
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { position: "top" } },
+                    scales: { y: { beginAtZero: false } },
+                  }}
+                />
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {selectedLabel && (
+        <>
+          <div className="modal-backdrop fade show" onClick={closeBudgetModal}></div>
+          <div className="modal fade show d-block" tabIndex={-1} role="dialog">
+            <div className="modal-dialog modal-lg modal-dialog-scrollable" role="document">
+              <div className="modal-content">
+                <div className="modal-header">
+                  <h5 className="modal-title">
+                    <i className="bi bi-list-ul me-2 text-primary"></i>
+                    Budgets — {selectedLabel}
+                  </h5>
+                  {budgetMonths.length > 0 && (
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1 ms-3"
+                      onClick={toggleAllMonths}
+                    >
+                      <i
+                        className={`bi bi-${allMonthsExpanded ? "arrows-collapse" : "arrows-expand"}`}
+                      ></i>
+                      {allMonthsExpanded ? "Tout replier" : "Tout déplier"}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="btn-close ms-auto"
+                    onClick={closeBudgetModal}
+                  ></button>
+                </div>
+                <div className="modal-body">
+                  {loadingBudgets ? (
+                    <div className="d-flex justify-content-center py-4">
+                      <div className="spinner-border text-primary" role="status">
+                        <span className="visually-hidden">Chargement…</span>
+                      </div>
+                    </div>
+                  ) : budgetRows.length === 0 ? (
+                    <p className="text-muted mb-0">
+                      Aucun budget trouvé pour cette catégorie sur cette année.
+                    </p>
+                  ) : (
+                    <div className="table-responsive">
+                      <table className="table table-hover align-middle mb-0">
+                        <thead>
+                          <tr>
+                            <th style={thStyle}>Sous-catégorie</th>
+                            <th style={thStyle}>Libellé</th>
+                            <th className="text-end" style={thStyle}>Prévu</th>
+                            <th className="text-end" style={thStyle}>Réalisé</th>
+                            <th className="text-end" style={thStyle}>Écart</th>
+                            <th style={thStyle}>Statut</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {Array.from({ length: 12 }, (_, i) => i + 1)
+                            .map((month) => ({
+                              month,
+                              rows: budgetRows.filter((r) => r.month === month),
+                            }))
+                            .filter((m) => m.rows.length > 0)
+                            .map((m) => {
+                              const planned = m.rows.reduce((s, r) => s + toNum(r.planned), 0);
+                              const actual = m.rows.reduce((s, r) => s + toNum(r.actual), 0);
+                              const variance = planned - actual;
+                              return (
+                                <ReactFragment key={m.month}>
+                                  <tr
+                                    role="button"
+                                    onClick={() => toggleMonth(m.month)}
+                                    style={{ cursor: "pointer", backgroundColor: "#f8f9fa" }}
+                                  >
+                                    <td colSpan={2} className="fw-semibold" style={tdStyle}>
+                                      <i
+                                        className={`bi bi-chevron-${expandedMonths.has(m.month) ? "down" : "right"} me-2 text-muted`}
+                                      ></i>
+                                      {monthNames[m.month - 1] ?? m.month}
+                                    </td>
+                                    <td className="text-end fw-semibold text-muted" style={tdStyle}>
+                                      {formatNumber(planned)} €
+                                    </td>
+                                    <td className="text-end fw-semibold" style={tdStyle}>
+                                      {formatNumber(actual)} €
+                                    </td>
+                                    <td
+                                      className={`text-end fw-semibold ${variance > 0 ? "text-success" : variance < 0 ? "text-danger" : ""}`}
+                                      style={tdStyle}
+                                    >
+                                      {variance > 0 ? "+" : ""}
+                                      {formatNumber(variance)} €
+                                    </td>
+                                    <td className="text-muted small" style={tdStyle}>
+                                      {m.rows.length} ligne{m.rows.length > 1 ? "s" : ""}
+                                    </td>
+                                  </tr>
+                                  {expandedMonths.has(m.month) &&
+                                    m.rows.map((row, idx) => {
+                                    const rowVariance = toNum(row.planned) - toNum(row.actual);
+                                    return (
+                                      <tr key={idx}>
+                                        <td style={tdStyle}>{row.category_name}</td>
+                                        <td className="text-muted" style={tdStyle}>
+                                          {row.label || "—"}
+                                        </td>
+                                        <td className="text-end text-muted" style={tdStyle}>
+                                          {formatNumber(row.planned)} €
+                                        </td>
+                                        <td className="text-end" style={tdStyle}>
+                                          {formatNumber(row.actual)} €
+                                        </td>
+                                        <td
+                                          className={`text-end ${rowVariance > 0 ? "text-success" : rowVariance < 0 ? "text-danger" : ""}`}
+                                          style={tdStyle}
+                                        >
+                                          {rowVariance > 0 ? "+" : ""}
+                                          {formatNumber(rowVariance)} €
+                                        </td>
+                                        <td style={tdStyle}>
+                                          <span
+                                            className={`badge ${row.approved ? "bg-success" : "bg-secondary"}`}
+                                          >
+                                            {row.approved ? "Approuvé" : "Non approuvé"}
+                                          </span>
+                                        </td>
+                                      </tr>
+                                    );
+                                  })}
+                                </ReactFragment>
+                              );
+                            })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+                <div className="modal-footer">
+                  <button type="button" className="btn btn-outline-secondary" onClick={closeBudgetModal}>
+                    Fermer
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+    </>
+  );
+}

@@ -1,0 +1,142 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// Tous les montants sont stockés en centimes (Int) pour éviter les erreurs
+// d'arrondi des flottants. La conversion « 12.50 » <-> 1250 est faite dans
+// lib/server/money.ts ; l'API continue d'exposer des chaînes décimales.
+
+model Account {
+  id           Int      @id @default(autoincrement())
+  name         String
+  currency     String   @default("EUR")
+  balanceCents Int      @default(0)
+  createdAt    DateTime @default(now())
+
+  transactions       Transaction[]
+  subscriptions      Subscription[]
+  savingsGoals       SavingsGoal[]
+  budgets            Budget[]      @relation("BudgetAccount")
+  incomingTransfers  Budget[]      @relation("BudgetDestinationAccount")
+}
+
+model Category {
+  id              Int     @id @default(autoincrement())
+  name            String
+  transactionType String // income | expense | transfer
+  description     String?
+  parentId        Int?
+
+  parent        Category?  @relation("CategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children      Category[] @relation("CategoryTree")
+  transactions  Transaction[]
+  budgets       Budget[]
+  subscriptions Subscription[]
+  savingsGoals  SavingsGoal[]
+}
+
+model Transaction {
+  id              Int      @id @default(autoincrement())
+  accountId       Int
+  categoryId      Int
+  amountCents     Int
+  type            String // credit | debit
+  transactionDate DateTime
+  year            Int
+  month           Int
+  label           String
+  notes           String?
+  createdAt       DateTime @default(now())
+
+  account  Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  category Category @relation(fields: [categoryId], references: [id])
+
+  approvedBudgets            Budget[] @relation("BudgetApprovedTransaction")
+  approvedDestinationBudgets Budget[] @relation("BudgetApprovedDestinationTransaction")
+
+  @@index([year, month])
+  @@index([transactionDate])
+}
+
+model Subscription {
+  id          Int       @id @default(autoincrement())
+  name        String
+  accountId   Int
+  categoryId  Int
+  amountCents Int
+  frequency   String // monthly | yearly | quarterly | occasional
+  dayOfMonth  Int?
+  startDate   DateTime
+  endDate     DateTime?
+  status      String    @default("active") // active | inactive
+  notes       String?
+  createdAt   DateTime  @default(now())
+
+  account  Account  @relation(fields: [accountId], references: [id])
+  category Category @relation(fields: [categoryId], references: [id])
+  budgets  Budget[]
+}
+
+model SavingsGoal {
+  id                      Int       @id @default(autoincrement())
+  name                    String
+  accountId               Int
+  categoryId              Int
+  targetAmountCents       Int
+  contributionAmountCents Int
+  frequency               String    @default("monthly")
+  status                  String    @default("active") // active | inactive | completed
+  startDate               DateTime
+  endDate                 DateTime?
+  dayOfMonth              Int?
+  notes                   String?
+
+  account  Account  @relation(fields: [accountId], references: [id])
+  category Category @relation(fields: [categoryId], references: [id])
+  budgets  Budget[]
+}
+
+model Budget {
+  id                               Int       @id @default(autoincrement())
+  categoryId                       Int
+  label                            String?
+  accountId                        Int?
+  destinationAccountId             Int?
+  year                             Int
+  month                            Int
+  plannedAmountCents               Int       @default(0)
+  actualAmountCents                Int       @default(0)
+  approvedAt                       DateTime?
+  approvedTransactionId            Int?
+  approvedDestinationTransactionId Int?
+  sourceSubscriptionId             Int?
+  sourceSavingsGoalId              Int?
+  factumInvoiceId                  String?   @unique // facture Factum à l'origine de la ligne (évite les doublons)
+
+  category                  Category      @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  account                    Account?      @relation("BudgetAccount", fields: [accountId], references: [id])
+  destinationAccount         Account?      @relation("BudgetDestinationAccount", fields: [destinationAccountId], references: [id])
+  approvedTransaction        Transaction?  @relation("BudgetApprovedTransaction", fields: [approvedTransactionId], references: [id], onDelete: SetNull)
+  approvedDestinationTransaction Transaction? @relation("BudgetApprovedDestinationTransaction", fields: [approvedDestinationTransactionId], references: [id], onDelete: SetNull)
+  sourceSubscription         Subscription? @relation(fields: [sourceSubscriptionId], references: [id], onDelete: SetNull)
+  sourceSavingsGoal          SavingsGoal?  @relation(fields: [sourceSavingsGoalId], references: [id], onDelete: SetNull)
+
+  @@unique([categoryId, accountId, destinationAccountId, year, month, label])
+  @@index([year, month])
+  @@map("monthly_budget")
+}
+
+// Lien avec l'application Factum (une seule). Ses factures se lisent par GET <factum>/api/budget?from=&to= ;
+// depuis la vue d'un mois, on choisit celles à ajouter comme lignes de budget.
+// (Nouveau nom de table : l'ancienne table « FactumLink » d'une version précédente n'est plus utilisée.)
+model FactumConnection {
+  id    Int    @id @default(1)
+  appId String
+
+  @@map("factum_connection")
+}
