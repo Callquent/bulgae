@@ -37,5 +37,6 @@ Chaque facture devient une ligne de budget du mois affiché (prévu = réalisé 
 - Factum fournit `GET /api/budget?from=YYYY-MM-DD&to=YYYY-MM-DD` -> `{ "invoices": [{ id, company, amount, date, reference?, path? }] }` (800 jours max).
 - Rien n'est copié automatiquement ; les montants sont relus dans Factum au moment de l'ajout.
 - « Délier » ne supprime aucune ligne : celles déjà ajoutées restent.
+- La page « Liens » de Triviae lit `GET /api/liens` : le budget y déclare Factum (direction « in ») dès qu'il est lié.
 - Si le port de Triviae est inhabituel, définir `HUB_URL`.
 - Après mise à jour : `npm install` puis `npm run db:push` (table `factum_connection`, colonne `factumInvoiceId`).
