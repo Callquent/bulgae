@@ -12,7 +12,7 @@ export async function GET(req: Request) {
   const year = Number(new URL(req.url).searchParams.get("year"));
   if (!Number.isInteger(year) || year < 2000 || year > 2100) return error("Année invalide.");
   const link = await getLink();
-  if (!link) return error("Factum n'est pas lié : ouvrez Configuration > Factum.", 409);
+  if (!link) return error("Factum n'est pas lié : dans Triviae, page Liens, liez le budget à Factum.", 409);
 
   const { from, to } = windowFor(year);
   let invoices;

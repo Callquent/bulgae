@@ -29,14 +29,14 @@ MYSQL_URL="mysql://user:motdepasse@127.0.0.1:3306/nom_base" npm run db:import-my
 
 ## Lien avec Factum (factures)
 
-Page **Configuration > Factum** : on indique seulement l'identifiant de Factum dans Triviae.
+Le lien se crée dans **Triviae > Liens > « Lier des applications »** (« Budget reçoit des factures de Factum ») : il n'y a plus d'écran de liaison dans le budget.
 Ensuite, dans la vue d'un mois du budget, le bouton **Ajouter facture de Factum** liste les factures de Factum
 (plage : janvier de l'an dernier à décembre de l'année affichée) ; on coche celles à ajouter et on choisit le compte et la catégorie.
 Chaque facture devient une ligne de budget du mois affiché (prévu = réalisé = montant de la facture). Une facture déjà ajoutée est signalée.
 
 - Factum fournit `GET /api/budget?from=YYYY-MM-DD&to=YYYY-MM-DD` -> `{ "invoices": [{ id, company, amount, date, reference?, path? }] }` (800 jours max).
 - Rien n'est copié automatiquement ; les montants sont relus dans Factum au moment de l'ajout.
-- « Délier » ne supprime aucune ligne : celles déjà ajoutées restent.
-- La page « Liens » de Triviae lit `GET /api/liens` : le budget y déclare Factum (direction « in ») dès qu'il est lié.
+- Retirer le lien dans Triviae ne supprime aucune ligne du budget.
+- La page « Liens » de Triviae lit `GET /api/liens` : seule l'ancienne liaison (avant Triviae) y est déclarée, pour être reprise via « Les reprendre dans Triviae ».
 - Si le port de Triviae est inhabituel, définir `HUB_URL`.
 - Après mise à jour : `npm install` puis `npm run db:push` (table `factum_connection`, colonne `factumInvoiceId`).

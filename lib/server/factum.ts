@@ -66,4 +66,39 @@ export const windowFor = (year: number) => ({ from: `${year - 1}-01-01`, to: `${
 
 export const invoiceLabel = (i: Pick<FeedInvoice, "company" | "reference">) => (i.reference ? `${i.company} — ${i.reference}` : i.company);
 
-export const getLink = () => prisma.factumConnection.findUnique({ where: { id: 1 } });
+// Le lien se choisit dans Triviae (page « Liens » : « Budget reçoit des factures de Factum »).
+// - Triviae a un lien : on l'utilise, et l'ancienne liaison de la base est effacée (reprise faite).
+// - Triviae injoignable ou sans lien : on garde l'ancienne liaison de la base, si elle existe, pour ne rien perdre.
+// Quand le lien est retiré dans Triviae, plus rien n'est lié.
+export type FactumLink = { appId: string };
+
+export async function getLink(): Promise<FactumLink | null> {
+  const hub = await hubUrl();
+  if (hub) {
+    try {
+      const id = process.env.TRIVIAE_APP_ID || "budget";
+      const res = await fetch(`${hub}/hub/links/for/${encodeURIComponent(id)}`, { signal: AbortSignal.timeout(1500), cache: "no-store" });
+      if (res.ok) {
+        const data = (await res.json()) as { links?: unknown; managed?: unknown };
+        if (Array.isArray(data.links)) {
+          const hit = data.links.find((l) => !!l && typeof l === "object" && (l as { feed?: unknown }).feed === "budget" && typeof (l as { provider?: unknown }).provider === "string") as { provider: string } | undefined;
+          if (hit) {
+            await prisma.factumConnection.deleteMany({}).catch(() => undefined);
+            return { appId: hit.provider };
+          }
+          if (data.managed === true) {
+            // liens gérés dans Triviae et aucun pour le budget : l'ancienne liaison est abandonnée
+            await prisma.factumConnection.deleteMany({}).catch(() => undefined);
+            return null;
+          }
+        }
+      }
+    } catch {
+      /* Triviae injoignable : on retombe sur l'ancienne liaison */
+    }
+  }
+  return prisma.factumConnection.findUnique({ where: { id: 1 } });
+}
+
+/** Vrai tant que la liaison vient encore de la base du budget (à reprendre dans Triviae). */
+export const legacyLink = () => prisma.factumConnection.findUnique({ where: { id: 1 } });

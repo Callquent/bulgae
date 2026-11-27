@@ -39,7 +39,6 @@ const NAV_GROUPS: { label: string; icon: string; items: NavItem[] }[] = [
     items: [
       { name: "Comptes",    href: "/accounts",   icon: "bi-bank" },
       { name: "Catégories", href: "/categories", icon: "bi-tags" },
-      { name: "Factum",     href: "/factum",     icon: "bi-receipt" },
     ],
   },
 ];

@@ -1,5 +1,4 @@
 "use client";
-import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 
 interface Invoice { id: string; company: string; amount: string; date: string; reference: string; added: boolean }
@@ -90,7 +89,7 @@ export default function FactumInvoiceModal({
               {error && (
                 <p className="text-danger">
                   {error}{" "}
-                  {notLinked && <Link href="/factum" onClick={onClose}>Lier Factum</Link>}
+                  {notLinked && <>Ouvrez Triviae &gt; Liens pour lier le budget à Factum.</>}
                 </p>
               )}
               {data && (
